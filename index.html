@@ -1589,6 +1589,7 @@ body.search-fixed .search-control-panel{padding-bottom:4px !important;}
 <nav id="tabbar"></nav>
 <div id="modal"><div class="scrim" data-a="closeModal"></div><div class="sheet" id="sheet"></div></div>
 <input type="file" id="fileInput" accept=".csv,text/csv" hidden>
+<input type="file" id="historyFileInput" accept=".txt,text/plain" hidden>
 
 
 <script>
@@ -1604,7 +1605,7 @@ body.search-fixed .search-control-panel{padding-bottom:4px !important;}
  * ============================================================= */
 
 
-/* ---------- Organisation v12.2 ----------
+/* ---------- Organisation v12.3 ----------
  * 1. Constantes et données
  * 2. Utilitaires CSV / texte / dates / localisation
  * 3. État et persistance
@@ -1619,14 +1620,14 @@ body.search-fixed .search-control-panel{padding-bottom:4px !important;}
 /* ---------- Constantes ---------- */
 var DELIM=";";
 var DRIVE_CSV_FOLDER_URL="https://drive.google.com/drive/u/0/folders/1KNDG9zzJ6Eu2-w3NUt6-bDt8R62PquPn?usp=drive_link";
-var APP_NAME="Gestion de ma cave";var APP_VER="v12.2 — réglages simplifiés et nommage maître corrigé";
+var APP_NAME="Gestion de ma cave";var APP_VER="v12.4 — historique cumulatif importable et partage iPad";
 var COLS=["Propriété","Nom","Année","Couleur","Pays","Région","Appellation","Cépages","Volume",
 "Localisation","Date entrée","Prix","En cave","Date dégustation","Convives","Evénement","Mets",
 "Commentaire","Photo_etiquette_devant","Photo_etiquette_derriere","Photo_facture"];
 var CAP={"Vin rouge":"#7B1E2B","Vin blanc":"#C9A227","Vin rosé":"#D98A8A","Fermenté":"#7A8450","Spiritueux":"#8A6D3B"};
 function capColor(c){return CAP[(c||"").trim()]||"#9A9186";}
 var LIST_COLS=["Propriété","Couleur","Pays","Région","Appellation","Cépages","Volume","Convives","Evénement","Mets"];
-var K={snap:"cave_snap_v1",set:"cave_set_v1",lists:"cave_lists_v1",deg:"cave_degustations_v1"};
+var K={snap:"cave_snap_v1",set:"cave_set_v1",lists:"cave_lists_v1",deg:"cave_degustations_v1",hist:"cave_historique_audit_v1",histBase:"cave_historique_base_v1",histFile:"cave_historique_fichier_v1"};
 
 
 /* ---------- Stockage local (tolérant au bac à sable) ---------- */
@@ -1724,7 +1725,7 @@ function isCtrl(r){return (r["En cave"]||"").trim()==="2";}
 /* ---------- État ---------- */
 var state={
   headers:COLS.slice(),data:[],fileName:"",loaded:false,
-  session:[],dirty:false,nextId:1,
+  session:[],dirty:false,nextId:1,history:[],
   settings:{lastCave:true,projet:"Cave",githubCsvUrl:"",repertoire:"Drive > Application Gestion de ma cave > Historique et État",counter:{}},
   lists:{},
   inv:{cave:null,ligne:null,casier:null,progress:{}},
@@ -1819,6 +1820,22 @@ function saveSettings(){lsSet(K.set,JSON.stringify(state.settings));}
 function loadSettings(){var s=lsGet(K.set);if(s){try{var o=JSON.parse(s);for(var k in o)state.settings[k]=o[k];}catch(e){}}}
 function saveLists(){lsSet(K.lists,JSON.stringify(state.lists));}
 function loadLists(){var s=lsGet(K.lists);if(s){try{state.lists=JSON.parse(s)||{};}catch(e){}}}
+function saveHistory(){lsSet(K.hist,JSON.stringify(state.history||[]));}
+function loadHistory(){var s=lsGet(K.hist);if(!s){state.history=[];return;}try{var h=JSON.parse(s);state.history=Array.isArray(h)?h:[];}catch(e){state.history=[];}}
+var HISTORY_BASE_TEXT="";
+var HISTORY_BASE_FILE="";
+function saveHistoryBase(){lsSet(K.histBase,HISTORY_BASE_TEXT||"");lsSet(K.histFile,HISTORY_BASE_FILE||"");}
+function loadHistoryBase(){HISTORY_BASE_TEXT=lsGet(K.histBase)||"";HISTORY_BASE_FILE=lsGet(K.histFile)||"";}
+function chooseHistoryFromDeviceOrDrive(){var input=document.getElementById("historyFileInput");if(!input)return;input.value="";input.click();}
+function importHistoryText(txt,fileName){
+  HISTORY_BASE_TEXT=String(txt||"").replace(/^\uFEFF/,"").replace(/\s+$/g,"");
+  HISTORY_BASE_FILE=String(fileName||"Historique.txt");
+  /* Le fichier choisi devient la base cumulative de référence. Les blocs locaux
+     déjà mémorisés sont remis à zéro pour éviter de les dupliquer si ce TXT les contient. */
+  state.history=[];saveHistory();saveHistoryBase();
+  toast("Historique chargé : "+HISTORY_BASE_FILE);
+  if(state.route.name==="reglages")SCR.reglages();
+}
 
 
 /* ---------- Journal + mutations ---------- */
@@ -1832,7 +1849,30 @@ function logChange(type,txt,details){
   state.dirty=true;
 }
 function commit(){refreshLists();saveSnapshot();}
-
+function cloneRowForAudit(row){
+  var o={};
+  (state.headers||COLS).forEach(function(h){if(h&&h!=="_id")o[h]=String(row[h]==null?"":row[h]);});
+  return o;
+}
+function recordCellChange(row,field,newValue,changes){
+  var oldValue=String(row[field]==null?"":row[field]);
+  newValue=String(newValue==null?"":newValue);
+  if(oldValue===newValue)return false;
+  var before=cloneRowForAudit(row);
+  row[field]=newValue;
+  var after=cloneRowForAudit(row);
+  changes.push({id:String(row._id||""),field:field,oldValue:oldValue,newValue:newValue,before:before,after:after});
+  return true;
+}
+function auditRowLabel(change){
+  var r=change.after||change.before||{};
+  return [r["Propriété"],r["Nom"],r["Année"],r["Volume"]].filter(Boolean).join(" | ")||("Ligne "+String(change.id||"?"));
+}
+function auditValue(v){v=String(v==null?"":v);return v===""?"vide":v.replace(/\r?\n/g," ");}
+function historyStemForMaster(name){
+  var m=String(name||"").match(/_(\d{6})_(\d{3})$/);
+  return m?("Historique_"+m[1]+"_"+m[2]):("Historique_"+yymmdd()+"_"+pad3(nextMasterCounter()));
+}
 
 /* ---------- Applique le thème ---------- */
 var DESIGN_DEFAULT={bg:"#4A0008",surface:"#79000E",surface2:"#62000B",ink:"#FFF1C2",soft:"#E4C77A",line:"#C99B2E",brass:"#FFD75A",accent:"#B80016",size:17,lh:1.4,pad:16,r:14};
@@ -2248,7 +2288,7 @@ function byId(id){for(var i=0;i<state.data.length;i++)if(state.data[i]._id===Str
 
 
 /* ---------- Recherche ---------- */
-var SS={init:false,scope:"stock",text:"",f:{Couleur:[],Pays:[],Région:[],Appellation:[],Volume:[]},labelFilter:"",priceMin:"",priceMax:"",qtyMin:"",qtyMax:"",sorts:["Propriété","Année","Nom"],showPrice:true,showSelectionTools:true,sel:{},selRows:{},visibleRowsByKey:{},audit:{ok:true,message:""},selView:false,sortCol:"Propriété",sortDir:"asc"};
+var SS={init:false,scope:"stock",text:"",f:{Couleur:[],Pays:[],Région:[],Appellation:[],Volume:["750mL"]},labelFilter:"",priceMin:"",priceMax:"",qtyMin:"",qtyMax:"",sorts:["Propriété","Année","Nom"],showPrice:true,showSelectionTools:true,sel:{},selRows:{},visibleRowsByKey:{},audit:{ok:true,message:""},selView:false,sortCol:"Propriété",sortDir:"asc"};
 
 
 /* ---------- Sélection centralisée (v11.2) ----------
@@ -2352,14 +2392,13 @@ SCR.recherche=function(){
   document.querySelectorAll('[data-seg="scope"]').forEach(function(b){
     b.addEventListener("click",function(){
       SS.scope=b.dataset.val;
-      SS.f={Couleur:[],Pays:[],Région:[],Appellation:[],Volume:[]};
+      SS.text="";
+      SS.f={Couleur:[],Pays:[],Région:[],Appellation:[],Volume:["750mL"]};
       SS.labelFilter="";
       SS.priceMin="";
       SS.priceMax="";
       SS.qtyMin="";
       SS.qtyMax="";
-      SS.sel={};
-      SS.selRows={};
       SS.selView=false;
       render();
     });
@@ -3364,8 +3403,11 @@ function bindSearchFilters(){
   document.querySelectorAll("[data-clear-extra]").forEach(function(b){b.addEventListener("click",function(){SS[b.dataset.clearExtra]="";runSearch();});});
   var fclr=document.querySelector(".flt-clear-all");
   if(fclr)fclr.addEventListener("click",function(){
-    SS.f={Couleur:[],Pays:[],Région:[],Appellation:[],Volume:[]};
+    SS.text="";
+    SS.f={Couleur:[],Pays:[],Région:[],Appellation:[],Volume:["750mL"]};
     SS.labelFilter="";SS.priceMin="";SS.priceMax="";SS.qtyMin="";SS.qtyMax="";
+    var q=document.getElementById("q");if(q)q.value="";
+    var qc=document.getElementById("q-clear");if(qc)qc.style.display="none";
     runSearch();
   });
 
@@ -3785,11 +3827,13 @@ function doDeguster(key){var locSel=document.getElementById("d-loc");var loc=loc
   var conv=document.getElementById("d-conv").value,evt=document.getElementById("d-evt").value,
       mets=document.getElementById("d-mets").value,com=document.getElementById("d-com").value;
   var cand=state.data.filter(function(r){return wineKey(r)===key&&(r["En cave"]||"").trim()==="1"&&(!loc||(r["Localisation"]||"").trim()===loc);});
-  nb=Math.min(nb,cand.length);
-  for(var i=0;i<nb;i++){var r=cand[i];r["En cave"]="0";r["Date dégustation"]=date;
-    if(conv)r["Convives"]=conv;if(evt)r["Evénement"]=evt;if(mets)r["Mets"]=mets;if(com)r["Commentaire"]=com;}
-  var rep=cand[0]||byId(null);
-  logChange("Dégustation",(nb)+"× "+((cand[0]&&cand[0]["Propriété"])||"")+" ("+date+")"+(conv?" — "+conv:""));
+  nb=Math.min(nb,cand.length);var changes=[];
+  for(var i=0;i<nb;i++){var r=cand[i];
+    recordCellChange(r,"En cave","0",changes);
+    recordCellChange(r,"Localisation","",changes);
+    recordCellChange(r,"Date dégustation",date,changes);
+    if(conv)recordCellChange(r,"Convives",conv,changes);if(evt)recordCellChange(r,"Evénement",evt,changes);if(mets)recordCellChange(r,"Mets",mets,changes);if(com)recordCellChange(r,"Commentaire",com,changes);}
+  logChange("Dégustation",(nb)+"× "+((cand[0]&&cand[0]["Propriété"])||"")+" ("+date+")"+(conv?" — "+conv:""),{kind:"rows",rows:changes});
   commit();closeModal();render();
 }
 
@@ -4223,52 +4267,44 @@ SCR.validation=function(){
 
   document.getElementById("screen").innerHTML=html;
 };;;
-function buildTXT(name){
-  var headers=(state.headers&&state.headers.length?state.headers.slice():COLS.slice())
-    .filter(function(h){return h&&h!=="_id";});
-
-  var entries=[];
-
-  state.session.forEach(function(event){
-    if(!(event.details&&event.details.kind==="rows"&&Array.isArray(event.details.rows)))return;
-
-    event.details.rows.forEach(function(change){
-      entries.push({
-        date:event.t,
-        type:event.type,
-        change:change
-      });
-    });
-  });
-
+function formatAuditBlock(fileStem,events,blockTime){
   var out=[];
-
-  if(!entries.length){
-    out.push("AUCUNE MODIFICATION DE LIGNE");
-    return out.join("\r\n")+"\r\n";
-  }
-
-  entries.forEach(function(entry,index){
-    var change=entry.change;
-
-    out.push("MODIFICATION "+(index+1));
-    out.push("Date : "+entry.date);
-    out.push("Champ modifié : "+String(change.field||""));
-    out.push("Ancienne valeur : "+String(change.oldValue==null?"":change.oldValue));
-    out.push("Nouvelle valeur : "+String(change.newValue==null?"":change.newValue));
-    out.push("");
-    out.push("LIGNE COMPLÈTE DU VIN APRÈS MODIFICATION");
-
-    headers.forEach(function(header){
-      var value=change.after&&change.after[header]!=null?change.after[header]:"";
-      out.push(header+" : "+String(value));
-    });
-
-    out.push("");
-    out.push("============================================================");
-    out.push("");
+  var fileName=fileStem+".csv";
+  if(!events||!events.length)return out;
+  events.forEach(function(event,ei){
+    var rows=(event.details&&event.details.kind==="rows"&&Array.isArray(event.details.rows))?event.details.rows:[];
+    out.push((event.t||blockTime||stamp())+" | CSV : "+fileName+" | Motif : "+String(event.type||"Modification"));
+    if(event.txt)out.push("Résumé : "+String(event.txt).replace(/\r?\n/g," "));
+    if(rows.length){
+      var grouped={},order=[];
+      rows.forEach(function(ch){
+        var id=String(ch.id||"");
+        if(!grouped[id]){grouped[id]=[];order.push(id);}
+        grouped[id].push(ch);
+      });
+      order.forEach(function(id,idx){
+        var changes=grouped[id],first=changes[0];
+        out.push("Bouteille "+(idx+1)+" | "+auditRowLabel(first));
+        out.push(changes.map(function(ch){return String(ch.field||"")+" : "+auditValue(ch.oldValue)+" → "+auditValue(ch.newValue);}).join(" | "));
+      });
+    }else{
+      out.push("Détail : aucune cellule CSV modifiée pour cette entrée.");
+    }
+    if(ei<events.length-1)out.push("");
   });
-
+  return out;
+}
+function buildTXT(name){
+  var out=[];
+  var base=String(HISTORY_BASE_TEXT||"").replace(/^\uFEFF/,"").replace(/\s+$/g,"");
+  if(base)out.push(base);
+  (state.history||[]).forEach(function(block){
+    var part=formatAuditBlock(block.file||"CSV",block.events||[],block.t||"");
+    if(part.length){if(out.length)out.push("", "============================================================", "");out=out.concat(part);}
+  });
+  var current=formatAuditBlock(name,state.session||[],stamp());
+  if(current.length){if(out.length)out.push("", "============================================================", "");out=out.concat(current);}
+  if(!out.length)out.push("AUCUNE MODIFICATION ENREGISTRÉE");
   return out.join("\r\n")+"\r\n";
 }
 
@@ -4343,23 +4379,24 @@ function validateGeneratedCSV(csvText){
     }
   });
 
+  var finalChangesById={};
   state.session.forEach(function(event){
     if(!(event.details&&event.details.kind==="rows"&&Array.isArray(event.details.rows)))return;
-
-    event.details.rows.forEach(function(change){
-      var expectedSignature=rowSignatureForExport(change.after,headers);
-
-      if(!actualCounts[expectedSignature]){
-        errors.push(
-          "La ligne modifiée n’est pas présente dans le CSV : "
-          +String(change.after["Propriété"]||"")
-          +" "+String(change.after["Nom"]||"")
-          +" "+String(change.after["Année"]||"")
-          +" · "+String(change.field||"")
-          +" = "+String(change.newValue==null?"":change.newValue)
-        );
-      }
-    });
+    event.details.rows.forEach(function(change){finalChangesById[String(change.id||"")]=change;});
+  });
+  Object.keys(finalChangesById).forEach(function(id){
+    var change=finalChangesById[id];
+    var row=byId(id);
+    var finalRow=row?cloneRowForAudit(row):(change.after||{});
+    var expectedSignature=rowSignatureForExport(finalRow,headers);
+    if(!actualCounts[expectedSignature]){
+      errors.push(
+        "La ligne modifiée n’est pas présente dans le CSV : "
+        +String(finalRow["Propriété"]||"")
+        +" "+String(finalRow["Nom"]||"")
+        +" "+String(finalRow["Année"]||"")
+      );
+    }
   });
 
   return Array.from(new Set(errors));
@@ -4388,7 +4425,7 @@ function downloadPendingExport(kind){
     );
   }else if(kind==="txt"){
     ok=downloadTextFile(
-      PENDING_EXPORT.name+".txt",
+      PENDING_EXPORT.historyName+".txt",
       PENDING_EXPORT.txt,
       "text/plain"
     );
@@ -4397,6 +4434,20 @@ function downloadPendingExport(kind){
   if(!ok){
     alert("Le téléchargement n’a pas pu démarrer. Utilisez le bouton Copier correspondant.");
   }
+}
+
+function sharePendingExport(kind){
+  if(!PENDING_EXPORT){alert("Aucun fichier n’est prêt.");return;}
+  var fileName,content,mime;
+  if(kind==="csv"){fileName=PENDING_EXPORT.name+".csv";content=PENDING_EXPORT.csv;mime="text/csv";}
+  else{fileName=PENDING_EXPORT.historyName+".txt";content=PENDING_EXPORT.txt;mime="text/plain";}
+  FileExport.share(fileName,content,mime,{
+    bom:true,
+    onSuccess:function(){toast("Choisissez « Enregistrer dans Fichiers » ou Google Drive.");},
+    onCancel:function(){toast("Enregistrement annulé.");},
+    onUnavailable:function(){downloadTextFile(fileName,content,mime)||alert("Cette visionneuse ne permet pas l’enregistrement du fichier.");},
+    onError:function(){downloadTextFile(fileName,content,mime)||alert("La visionneuse a bloqué le fichier.");}
+  });
 }
 
 function finishPendingExport(){
@@ -4411,6 +4462,10 @@ function finishPendingExport(){
   if(mCounter)exportedCounter=parseInt(mCounter[1],10)||exportedCounter;
   state.settings.counter[year]=Math.max(Number(state.settings.counter[year]||0),exportedCounter);
   state.fileName=PENDING_EXPORT.name;
+  if(state.session.length){
+    state.history.push({file:PENDING_EXPORT.name,t:stamp(),events:JSON.parse(JSON.stringify(state.session))});
+    saveHistory();
+  }
   state.session=[];
   state.dirty=false;
   saveSettings();
@@ -4447,6 +4502,7 @@ function doExport(name){
 
   PENDING_EXPORT={
     name:name,
+    historyName:historyStemForMaster(name),
     csv:csv,
     txt:txt
   };
@@ -4460,7 +4516,7 @@ function showExportPreview(kind){
   var area=document.getElementById("preview-content");
   if(!title||!area)return;
   if(kind==="txt"){
-    title.textContent=PENDING_EXPORT.name+".txt";
+    title.textContent=PENDING_EXPORT.historyName+".txt";
     area.value=PENDING_EXPORT.txt;
   }else{
     title.textContent=PENDING_EXPORT.name+".csv";
@@ -4475,7 +4531,7 @@ function showExportSheet(name,csv,txt){
     +'<p class="small muted">Vérifiez le contenu avant téléchargement. La session reste ouverte jusqu’au bouton Terminer.</p>'
     +'<div class="export-tabs">'
     +'<button class="btn sm" data-a="preview-file" data-t="csv">Aperçu CSV</button>'
-    +'<button class="btn sm flat" data-a="preview-file" data-t="txt">Aperçu TXT</button>'
+    +'<button class="btn sm flat" data-a="preview-file" data-t="txt">Aperçu Historique</button>'
     +'</div>'
     +'<div class="export-preview">'
     +'<div id="preview-title" class="source-title">'+esc(name)+'.csv</div>'
@@ -4484,10 +4540,10 @@ function showExportSheet(name,csv,txt){
     +'<textarea class="hidden" id="exp-csv" readonly>'+esc(csv)+'</textarea>'
     +'<textarea class="hidden" id="exp-txt" readonly>'+esc(txt)+'</textarea>'
     +'<div class="export-file-card"><b>'+esc(name)+'.csv</b>'
-    +'<div class="btnrow"><button class="btn" data-a="exp-download" data-t="csv">Télécharger le CSV</button>'
+    +'<div class="btnrow"><button class="btn" data-a="exp-share" data-t="csv">Enregistrer / partager le CSV</button>'
     +'<button class="btn flat" data-a="exp-copy" data-t="csv">Copier le CSV</button></div></div>'
-    +'<div class="export-file-card"><b>'+esc(name)+'.txt</b>'
-    +'<div class="btnrow"><button class="btn" data-a="exp-download" data-t="txt">Télécharger le TXT</button>'
+    +'<div class="export-file-card"><b>'+esc(PENDING_EXPORT.historyName)+'.txt</b>'
+    +'<div class="btnrow"><button class="btn" data-a="exp-share" data-t="txt">Enregistrer / partager l’historique</button>'
     +'<button class="btn flat" data-a="exp-copy" data-t="txt">Copier le TXT</button></div></div>'
     +'<div class="btnrow"><button class="btn flat" data-a="exp-cancel">Annuler</button>'
     +'<button class="btn" data-a="exp-finish">Terminer</button></div>'
@@ -4513,6 +4569,10 @@ SCR.reglages=function(){
   html+='<div class="source-card"><div class="source-title">Choisir dans Fichiers ou Google Drive</div>'
     +'<div class="tiny muted">Le sélecteur iOS permet de choisir le fichier CSV dans Fichiers, iCloud Drive ou Google Drive.</div>'
     +'<button class="btn flat" data-a="choose-csv-drive">Choisir un CSV</button></div>';
+  html+='<div class="source-card"><div class="source-title">Historique TXT cumulatif</div>'
+    +'<div class="tiny muted">Chargez votre fichier Historique existant une fois. Les prochaines modifications seront ajoutées à sa suite.</div>'
+    +(HISTORY_BASE_FILE?'<div class="small" style="margin-top:7px"><b>Chargé : </b>'+esc(HISTORY_BASE_FILE)+'</div>':'<div class="small muted" style="margin-top:7px">Aucun historique de base chargé.</div>')
+    +'<button class="btn flat" data-a="choose-history-drive">Choisir l’historique TXT</button></div>';
   html+='</div></div>';
 
   html+='<div class="section"><div class="lbl">Nom du fichier maître</div>'
@@ -4721,7 +4781,7 @@ SCR.degustation=function(){
     +'<div id="deg-tabs" class="deg-event-tabs"></div><div id="deg-event-area"></div><div id="deg-status" class="deg-status">Aucun événement créé.</div>'
     +'<div class="section" style="margin-top:18px"><div class="lbl">Rapport</div><div class="deg-toolbar">'
     +'<button class="btn sm" data-a="deg-report-show">Créer et visualiser le rapport</button>'
-    +'<button class="btn sm flat" data-a="deg-report-save">Sauvegarder le rapport TXT</button>'
+    +'<button class="btn sm" data-a="deg-apply-csv">Appliquer au CSV</button>'
     +'<button class="btn sm flat" data-a="deg-report-hide">Masquer</button></div>'
     +'<div id="deg-report" class="deg-report" style="display:none"><pre id="deg-report-text"></pre></div></div>'
     +degDatalist("deg-guests-list",guests)+degDatalist("deg-events-list",evs)+degDatalist("deg-dishes-list",dishes)
@@ -4792,6 +4852,44 @@ function degReport(){
   lines.push("TOTAL : "+total+" bouteille(s)");
   return lines.join("\n");
 }
+function degApplyToCSV(){
+  if(!DEG.events.length){toast("Aucune dégustation à appliquer.");return;}
+  var pool=degPool(),byKey=degPoolByKey(pool),problems=[];
+  DEG.events.forEach(function(ev){
+    if(!ev.date)problems.push("Date manquante pour « "+(ev.event||"événement")+" ».");
+    ev.wines.forEach(function(item){var w=byKey[item.key];if(!w)problems.push("Vin introuvable ou plus disponible dans la sélection.");else if(item.quantity>w.available)problems.push(w.label+" : "+item.quantity+" demandée(s), "+w.available+" disponible(s).");});
+  });
+  if(problems.length){alert("Application impossible :\n\n"+problems.join("\n"));return;}
+  var totalChanges=0,totalBottles=0;
+  DEG.events.forEach(function(ev){
+    ev.wines.forEach(function(item){
+      var w=byKey[item.key];if(!w)return;
+      var candidates=(w.rowIds||[]).map(byId).filter(function(r){return r&&isStock(r);}).slice(0,item.quantity);
+      if(candidates.length!==item.quantity){problems.push(w.label+" : stock physique insuffisant au moment de l’application.");return;}
+      var changes=[];var date=htmlToCsvDate(ev.date);
+      candidates.forEach(function(r){
+        recordCellChange(r,"En cave","0",changes);
+        recordCellChange(r,"Localisation","",changes);
+        recordCellChange(r,"Date dégustation",date,changes);
+        if(ev.guests)recordCellChange(r,"Convives",ev.guests,changes);
+        if(ev.event)recordCellChange(r,"Evénement",ev.event,changes);
+        if(item.dish)recordCellChange(r,"Mets",item.dish,changes);
+        var tastingParts=[];if(item.rating)tastingParts.push("Appréciation : "+item.rating);if(item.note)tastingParts.push("Dégustation : "+item.note);
+        if(tastingParts.length){var old=String(r["Commentaire"]||"");var added=tastingParts.join(" | ");recordCellChange(r,"Commentaire",old?(old+" | "+added):added,changes);}
+      });
+      if(changes.length){
+        logChange("Dégustation",item.quantity+" bouteille(s) · "+w.label+" · "+(ev.event||"Dégustation")+" · "+date,{kind:"rows",rows:changes,meta:{date:date,guests:ev.guests,event:ev.event,dish:item.dish,rating:item.rating,note:item.note}});
+        totalChanges+=changes.length;totalBottles+=item.quantity;
+      }
+    });
+  });
+  if(problems.length){alert("Application interrompue :\n\n"+problems.join("\n"));return;}
+  if(!totalChanges){toast("Aucune cellule n’a été modifiée.");return;}
+  commit();DEG={events:[],seq:0,active:null};lsDel(K.deg);
+  toast(totalBottles+" bouteille(s) dégustée(s) appliquée(s). Préparez le nouveau CSV et l’historique.");
+  go("validation");
+}
+
 function degShowReport(){
   var p=document.getElementById("deg-report"),t=document.getElementById("deg-report-text");
   if(p&&t){t.textContent=degReport();p.style.display="block";}
@@ -4840,6 +4938,7 @@ document.addEventListener("click",function(ev){
       break;
     case "import":chooseCsvFromDeviceOrDrive();break;
     case "choose-csv-drive":chooseCsvFromDeviceOrDrive();break;
+    case "choose-history-drive":chooseHistoryFromDeviceOrDrive();break;
     case "closeModal":closeModal();break;
     case "uic-no":closeModal();UIC.cb=null;break;
     case "uic-yes":{var _cb=UIC.cb;UIC.cb=null;closeModal();if(_cb)_cb();}break;
@@ -4873,6 +4972,7 @@ document.addEventListener("click",function(ev){
     case "deg-load":degLoad();render();toast("Dégustations rechargées.");break;
     case "deg-reset":uiConfirm("Réinitialiser tous les événements de dégustation ?",function(){DEG={events:[],seq:0,active:null};lsDel(K.deg);render();});break;
     case "deg-report-show":degShowReport();break;
+    case "deg-apply-csv":uiConfirm("Appliquer cette dégustation au CSV maître ? Les bouteilles concernées passeront à En cave = 0 et leur localisation sera vidée.",degApplyToCSV);break;
     case "deg-report-hide":degHideReport();break;
     case "deg-report-save":degSaveTxt();break;
     case "deg-share-file":degShareFile();break;
@@ -4903,6 +5003,7 @@ document.addEventListener("click",function(ev){
     case "exp-copy":{var eta=document.getElementById(t.dataset.t==="csv"?"exp-csv":"exp-txt");if(eta){eta.focus();eta.select();try{eta.setSelectionRange(0,eta.value.length);}catch(e){}var ok=false;try{ok=document.execCommand("copy");}catch(e){}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(eta.value).catch(function(){});ok=true;}toast(ok?"Copié.":"Sélectionnez le texte puis copiez.");}}break;
     case "preview-file":showExportPreview(t.dataset.t);break;
     case "exp-download":downloadPendingExport(t.dataset.t);break;
+    case "exp-share":sharePendingExport(t.dataset.t);break;
     case "exp-cancel":PENDING_EXPORT=null;closeModal();break;
     case "exp-finish":finishPendingExport();break;
     case "exp-close":closeModal();go("accueil");break;
@@ -4968,21 +5069,28 @@ function invFinish(){
   locs.forEach(function(loc){var p=iv.progress[loc];var lots=p.lots||{};
     for(var key in lots){var lp=lots[key];
       var rows=state.data.filter(function(r){return isStock(r)&&(r["Localisation"]||"").trim()===loc&&wineKey(r)===key;});
-      var expected=rows.length;var name=rows[0]?rows[0]["Propriété"]+" "+rows[0]["Année"]:key;
-      if(lp.status==="absent"){rows.forEach(function(r){deactivateInv(r,invDate);});logChange("Inventaire",loc+" · "+name+" : absent (attendu "+expected+") → "+expected+" corrigée(s) : En cave 0, Convives « inventaire "+invDate+" »");applied++;if(lp.note)logChange("Inventaire",loc+" · "+name+" : "+lp.note);}
+      var expected=rows.length;var name=rows[0]?rows[0]["Propriété"]+" "+rows[0]["Année"]:key;var changes=[];
+      function markMissing(r){recordCellChange(r,"En cave","0",changes);recordCellChange(r,"Localisation","",changes);recordCellChange(r,"Convives","inventaire "+invDate,changes);}
+      if(lp.status==="absent"){rows.forEach(markMissing);if(changes.length){logChange("Inventaire",loc+" · "+name+" : absent, "+expected+" bouteille(s) retirée(s) du stock",{kind:"rows",rows:changes});applied++;}if(lp.note)logChange("Inventaire",loc+" · "+name+" · note : "+lp.note);}
       else if(lp.status==="present"){
-        if(lp.count<expected){var diff=expected-lp.count;for(var i=0;i<diff;i++)deactivateInv(rows[i],invDate);logChange("Inventaire",loc+" · "+name+" : "+lp.count+"/"+expected+" présentes → "+diff+" corrigée(s) : En cave 0, Convives « inventaire "+invDate+" »");applied++;}
-        else if(lp.count>expected){logChange("Inventaire",loc+" · "+name+" : "+lp.count+" trouvées (attendu "+expected+"), ajouter les manquantes");applied++;}
-        if(lp.etiq==="Non"){logChange("Inventaire",loc+" · "+name+" : étiquette absente");applied++;}
-        if(lp.note){logChange("Inventaire",loc+" · "+name+" : "+lp.note);applied++;}
+        if(lp.count<expected){var diff=expected-lp.count;for(var i=0;i<diff;i++)markMissing(rows[i]);if(changes.length){logChange("Inventaire",loc+" · "+name+" : "+lp.count+"/"+expected+" présentes, "+diff+" bouteille(s) retirée(s) du stock",{kind:"rows",rows:changes});applied++;}}
+        else if(lp.count>expected){logChange("Inventaire",loc+" · "+name+" : "+lp.count+" trouvées pour "+expected+" attendues — ajout à traiter");applied++;}
+        if(lp.etiq==="Non"){
+          var ecol=labelHeader();var labelChanges=[];
+          if(ecol)rows.forEach(function(r){recordCellChange(r,ecol,"Non",labelChanges);});
+          if(labelChanges.length){logChange("Inventaire",loc+" · "+name+" : étiquette indiquée absente",{kind:"rows",rows:labelChanges});applied++;}
+          else {logChange("Inventaire",loc+" · "+name+" : étiquette absente");applied++;}
+        }
+        if(lp.note){logChange("Inventaire",loc+" · "+name+" · note : "+lp.note);applied++;}
       }
-      else if(lp.note){logChange("Inventaire",loc+" · "+name+" : "+lp.note);applied++;}
+      else if(lp.note){logChange("Inventaire",loc+" · "+name+" · note : "+lp.note);applied++;}
     }});
   iv.progress={};iv.casier=null;
   commit();
-  toast(applied?applied+" constat(s) enregistré(s). Validez pour générer le CSV.":"Aucun écart constaté.");
+  toast(applied?applied+" constat(s) enregistré(s). Validez pour générer le CSV et l’historique.":"Aucun écart constaté.");
   go(state.dirty?"validation":"accueil");
 }
+
 function buildInvReport(){
   var iv=state.inv;
   var locs=Object.keys(iv.progress).sort(function(a,b){var pa=parseLoc(a),pb=parseLoc(b);
@@ -5045,11 +5153,21 @@ document.getElementById("fileInput").addEventListener("change",function(e){
 });
 
 
+document.getElementById("historyFileInput").addEventListener("change",function(e){
+  var file=e.target.files[0];if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(){importHistoryText(reader.result,file.name);};
+  reader.onerror=function(){toast("Impossible de lire le fichier Historique.");};
+  reader.readAsText(file,"utf-8");
+  e.target.value="";
+});
+
+
 /* ============================================================= *
  * DÉMARRAGE
  * ============================================================= */
 (function init(){
-  loadSettings();loadLists();applyTheme();
+  loadSettings();loadLists();loadHistory();loadHistoryBase();applyTheme();
   var filterSelfTestOk=runFilterSelfTests();
   var exactRowSelfTestOk=runExactRowSelfTests();
   var labelSelectionSelfTestOk=runLabelSelectionSelfTests();
