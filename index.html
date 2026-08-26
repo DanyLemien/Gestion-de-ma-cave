@@ -1620,7 +1620,7 @@ body.search-fixed .search-control-panel{padding-bottom:4px !important;}
 /* ---------- Constantes ---------- */
 var DELIM=";";
 var DRIVE_CSV_FOLDER_URL="https://drive.google.com/drive/u/0/folders/1KNDG9zzJ6Eu2-w3NUt6-bDt8R62PquPn?usp=drive_link";
-var APP_NAME="Gestion de ma cave";var APP_VER="v12.4 — historique cumulatif importable et partage iPad";
+var APP_NAME="Gestion de ma cave";var APP_VER="v12.5 — historique synchronisé et convives par défaut";
 var COLS=["Propriété","Nom","Année","Couleur","Pays","Région","Appellation","Cépages","Volume",
 "Localisation","Date entrée","Prix","En cave","Date dégustation","Convives","Evénement","Mets",
 "Commentaire","Photo_etiquette_devant","Photo_etiquette_derriere","Photo_facture"];
@@ -1824,10 +1824,29 @@ function saveHistory(){lsSet(K.hist,JSON.stringify(state.history||[]));}
 function loadHistory(){var s=lsGet(K.hist);if(!s){state.history=[];return;}try{var h=JSON.parse(s);state.history=Array.isArray(h)?h:[];}catch(e){state.history=[];}}
 var HISTORY_BASE_TEXT="";
 var HISTORY_BASE_FILE="";
+var HISTORY_PENDING_DEG_ADD=false;
 function saveHistoryBase(){lsSet(K.histBase,HISTORY_BASE_TEXT||"");lsSet(K.histFile,HISTORY_BASE_FILE||"");}
 function loadHistoryBase(){HISTORY_BASE_TEXT=lsGet(K.histBase)||"";HISTORY_BASE_FILE=lsGet(K.histFile)||"";}
+function fileIncrement(fileName){var m=String(fileName||"").replace(/\.[^.]+$/,'').match(/_(\d{3})$/);return m?parseInt(m[1],10):0;}
+function historyMatchesCurrentCSV(){var ci=currentMasterIncrement();return ci>0&&fileIncrement(HISTORY_BASE_FILE)===ci;}
+function expectedHistoryHint(){var ci=currentMasterIncrement();return ci?('incrément '+pad3(ci)):"le même incrément que le CSV chargé";}
 function chooseHistoryFromDeviceOrDrive(){var input=document.getElementById("historyFileInput");if(!input)return;input.value="";input.click();}
+function requireHistoryForTasting(){
+  if(!state.loaded){toast("Chargez d’abord le CSV maître.");return false;}
+  var ci=currentMasterIncrement();
+  if(!ci){alert("Le CSV chargé ne contient pas d’incrément identifiable. Chargez le CSV maître daté et incrémenté avant de préparer une dégustation.");return false;}
+  if(historyMatchesCurrentCSV())return true;
+  HISTORY_PENDING_DEG_ADD=true;
+  alert("Avant de préparer une dégustation, chargez le fichier Historique TXT portant "+expectedHistoryHint()+", identique à celui du CSV maître.");
+  chooseHistoryFromDeviceOrDrive();
+  return false;
+}
 function importHistoryText(txt,fileName){
+  var ci=currentMasterIncrement(),hi=fileIncrement(fileName);
+  if(state.loaded&&ci&&hi!==ci){
+    alert("Historique refusé : le CSV chargé porte l’incrément "+pad3(ci)+" alors que ce fichier Historique porte "+(hi?pad3(hi):"un incrément non identifiable")+". Choisissez l’Historique "+pad3(ci)+".");
+    return false;
+  }
   HISTORY_BASE_TEXT=String(txt||"").replace(/^\uFEFF/,"").replace(/\s+$/g,"");
   HISTORY_BASE_FILE=String(fileName||"Historique.txt");
   /* Le fichier choisi devient la base cumulative de référence. Les blocs locaux
@@ -1835,6 +1854,8 @@ function importHistoryText(txt,fileName){
   state.history=[];saveHistory();saveHistoryBase();
   toast("Historique chargé : "+HISTORY_BASE_FILE);
   if(state.route.name==="reglages")SCR.reglages();
+  if(HISTORY_PENDING_DEG_ADD&&historyMatchesCurrentCSV()){HISTORY_PENDING_DEG_ADD=false;degAddEvent();}
+  return true;
 }
 
 
@@ -4295,16 +4316,26 @@ function formatAuditBlock(fileStem,events,blockTime){
   return out;
 }
 function buildTXT(name){
-  var out=[];
+  var title="HISTORIQUE DES MODIFICATIONS - Cave\r\n====================================";
+  var out=[title];
   var base=String(HISTORY_BASE_TEXT||"").replace(/^\uFEFF/,"").replace(/\s+$/g,"");
-  if(base)out.push(base);
-  (state.history||[]).forEach(function(block){
-    var part=formatAuditBlock(block.file||"CSV",block.events||[],block.t||"");
-    if(part.length){if(out.length)out.push("", "============================================================", "");out=out.concat(part);}
-  });
+  var baseBody=base;
+  var titleRe=/^HISTORIQUE DES MODIFICATIONS - Cave\s*\r?\n=+\s*\r?\n?/i;
+  if(titleRe.test(baseBody))baseBody=baseBody.replace(titleRe,"").replace(/^\s+/,"");
+
+  /* Règle v12.5 : la modification la plus récente est toujours placée en haut,
+     immédiatement après le titre, puis viennent les blocs locaux précédents et enfin
+     le contenu de l’Historique chargé. */
+  var blocks=[];
   var current=formatAuditBlock(name,state.session||[],stamp());
-  if(current.length){if(out.length)out.push("", "============================================================", "");out=out.concat(current);}
-  if(!out.length)out.push("AUCUNE MODIFICATION ENREGISTRÉE");
+  if(current.length)blocks.push(current.join("\r\n"));
+  (state.history||[]).slice().reverse().forEach(function(block){
+    var part=formatAuditBlock(block.file||"CSV",block.events||[],block.t||"");
+    if(part.length)blocks.push(part.join("\r\n"));
+  });
+  if(baseBody)blocks.push(baseBody);
+  if(!blocks.length)blocks.push("AUCUNE MODIFICATION ENREGISTRÉE");
+  out.push("",blocks.join("\r\n\r\n============================================================\r\n\r\n"));
   return out.join("\r\n")+"\r\n";
 }
 
@@ -4570,7 +4601,7 @@ SCR.reglages=function(){
     +'<div class="tiny muted">Le sélecteur iOS permet de choisir le fichier CSV dans Fichiers, iCloud Drive ou Google Drive.</div>'
     +'<button class="btn flat" data-a="choose-csv-drive">Choisir un CSV</button></div>';
   html+='<div class="source-card"><div class="source-title">Historique TXT cumulatif</div>'
-    +'<div class="tiny muted">Chargez votre fichier Historique existant une fois. Les prochaines modifications seront ajoutées à sa suite.</div>'
+    +'<div class="tiny muted">Pour une dégustation, chargez l’Historique TXT portant le même incrément que le CSV maître. Toute nouvelle modification est ajoutée en haut du nouvel Historique.</div>'
     +(HISTORY_BASE_FILE?'<div class="small" style="margin-top:7px"><b>Chargé : </b>'+esc(HISTORY_BASE_FILE)+'</div>':'<div class="small muted" style="margin-top:7px">Aucun historique de base chargé.</div>')
     +'<button class="btn flat" data-a="choose-history-drive">Choisir l’historique TXT</button></div>';
   html+='</div></div>';
@@ -4606,27 +4637,22 @@ SCR.reglages=function(){
 SCR.apropos=function(){
   topbar("À propos","Cave à vin");
   document.getElementById("screen").innerHTML=
-   '<div class="card stack"><h2>Cave à vin — v12.2</h2>'
-   +'<p class="small">Gestion d\'une cave personnelle à partir d\'un fichier CSV de 21 colonnes. Le CSV reste le fichier maître ; chaque validation produit une nouvelle version datée, accompagnée d\'un fichier TXT d\'historique.</p>'
-   +'<p class="tiny muted">v11.3 — Création, partage et téléchargement des fichiers centralisés dans un moteur commun, sans modifier les formats métier.</p>'
-    +'<p class="tiny muted">v10.4 — Le nom proposé reprend les filtres actifs. Si seule une partie des résultats est cochée, le préfixe devient « Sélect partiel ». Le nom reste modifiable. CSV et TXT restent disponibles séparément.</p>'
-   +'<p class="tiny muted">v7 — Nom et version affichés en bas de l\'app et inscrits dans les fichiers générés. Inventaire : à la fin d\'une ligne, bouton « ligne suivante » (premier casier) ; pointage conservé en mémoire à chaque casier ; « Voir / télécharger » l\'inventaire en cours à tout moment. Affichage cave / ligne / casier en plus grand.</p>'
-   +'<p class="tiny muted">v6 — Inventaire : une bouteille manquante corrige directement la ligne (En cave → 0) et inscrit « inventaire jj.mm.aa » (date du jour) dans Convives, au lieu du statut « à contrôler ».</p>'
-   +'<p class="tiny muted">v5 — Recherche : filtres à sélection multiple (plusieurs régions, pays…) avec retrait par étiquette. Réglages : export / import des réglages. Fiche vin : présentation « fiche technique » aérée. Inventaire : « nombre de bouteilles dans le casier » en grand.</p>'
-   +'<p class="tiny muted">v4 — 100% local, aucun accès externe (ni police, image, script ou CDN externe ; aucun lien sortant). Export par partage iOS (« Enregistrer dans Fichiers ») avec repli copier-coller intégré. Validation : modifications triées par emplacement.</p>'
-   +'<p class="tiny muted">v3 — Dialogues internes. Liste par cave : tri + prix. Regroupement des emplacements. Fiche : statut « à contrôler ». Inventaire : sélecteur repliable, sans saut d\'écran, sauvegarde automatique.</p>'
-   +'<p class="tiny muted">v2 — Inventaire : « Terminer » bloqué tant qu\'un casier commencé a un vin non pointé ; états Présent/Absent et Étiquette colorés.</p>'
+   '<div class="card stack"><h2>Cave à vin — v12.5</h2>'
+   +'<p class="small">Application personnelle de gestion de cave fonctionnant à partir d’un fichier CSV maître de 22 colonnes. Une bouteille physique correspond à une ligne du CSV.</p>'
+   +'<p class="small">Les modifications sont d’abord préparées dans l’application. Lors de la validation, l’application crée un nouveau CSV daté et incrémenté ainsi qu’un Historique TXT portant le même incrément.</p>'
+   +'<p class="small"><b>Historique :</b> il constitue le journal d’audit du CSV. Chaque opération indique quand et pourquoi le CSV a changé, puis détaille bouteille par bouteille toutes les cellules réellement modifiées, avec ancienne valeur → nouvelle valeur. La modification la plus récente est placée en haut du document.</p>'
+   +'<p class="small"><b>Dégustation :</b> avant de préparer une dégustation, l’Historique TXT doit porter le même incrément que le CSV chargé. Les bouteilles dégustées passent de En cave = 1 à 0, leur localisation est vidée et les informations de dégustation sont reportées dans les colonnes correspondantes.</p>'
+   +'<p class="small"><b>Inventaire :</b> les écarts constatés modifient le CSV selon les choix validés et sont eux aussi inscrits dans l’Historique détaillé.</p>'
    +'<hr class="sep"><table class="facts">'
-   +'<tr><td>Plateformes</td><td>iPad, iPhone (Windows ultérieurement)</td></tr>'
-   +'<tr><td>Fonctionnement</td><td>En ligne et hors ligne</td></tr>'
-   +'<tr><td>Utilisateur</td><td>Unique</td></tr>'
-   +'<tr><td>Données</td><td>CSV maître · TXT historique</td></tr>'
-   +'<tr><td>Caves</td><td>5, structure fixe</td></tr>'
-   +'<tr><td>En cave</td><td>0 consommée · 1 présente · 2 à contrôler</td></tr>'
+   +'<tr><td>Plateformes</td><td>iPad et iPhone</td></tr>'
+   +'<tr><td>Fichiers de référence</td><td>CSV maître · TXT Historique</td></tr>'
+   +'<tr><td>Colonnes CSV</td><td>22</td></tr>'
+   +'<tr><td>Caves</td><td>5</td></tr>'
+   +'<tr><td>En cave</td><td>0 consommée / sortie · 1 présente · 2 à contrôler</td></tr>'
+   +'<tr><td>Sauvegarde locale</td><td>Session et préférences dans le navigateur</td></tr>'
    +'</table><hr class="sep">'
-   +'<p class="tiny muted">Sauvegarde locale automatique dans le navigateur. Ajoutez la page à l\'écran d\'accueil pour un usage hors ligne. Les fichiers générés arrivent dans l\'app Fichiers.</p></div>';
+   +'<p class="tiny muted">L’application ne remplace jamais silencieusement le fichier maître chargé : une validation produit une nouvelle version à enregistrer dans Fichiers ou Google Drive.</p></div>';
 };
-
 
 
 /* ============================================================= *
@@ -4706,7 +4732,9 @@ function degUsedKeys(exceptId){
   return used;
 }
 function degAddEvent(){
-  var ev={id:++DEG.seq,date:"",guests:"",event:"",pending:[],wines:[]};
+  if(!historyMatchesCurrentCSV()){if(!requireHistoryForTasting())return;}
+  HISTORY_PENDING_DEG_ADD=false;
+  var ev={id:++DEG.seq,date:"",guests:"Moi",event:"",pending:[],wines:[]};
   DEG.events.push(ev);DEG.active=ev.id;degSave(true);render();
 }
 function degDeleteEvent(id){
@@ -4778,6 +4806,7 @@ SCR.degustation=function(){
     +'<button class="btn sm flat" data-a="deg-save">Sauvegarder</button>'
     +'<button class="btn sm flat" data-a="deg-load">Recharger</button>'
     +'<button class="btn sm danger" data-a="deg-reset">Tout réinitialiser</button></div>'
+    +(state.loaded?'<div class="small '+(historyMatchesCurrentCSV()?"":"warn")+'" style="margin:8px 0 10px"><b>Historique requis :</b> '+(historyMatchesCurrentCSV()?esc(HISTORY_BASE_FILE):('chargez le TXT avec '+esc(expectedHistoryHint())+' avant toute dégustation.'))+'</div>':'')
     +'<div id="deg-tabs" class="deg-event-tabs"></div><div id="deg-event-area"></div><div id="deg-status" class="deg-status">Aucun événement créé.</div>'
     +'<div class="section" style="margin-top:18px"><div class="lbl">Rapport</div><div class="deg-toolbar">'
     +'<button class="btn sm" data-a="deg-report-show">Créer et visualiser le rapport</button>'
@@ -4854,6 +4883,7 @@ function degReport(){
 }
 function degApplyToCSV(){
   if(!DEG.events.length){toast("Aucune dégustation à appliquer.");return;}
+  if(!historyMatchesCurrentCSV()){requireHistoryForTasting();return;}
   var pool=degPool(),byKey=degPoolByKey(pool),problems=[];
   DEG.events.forEach(function(ev){
     if(!ev.date)problems.push("Date manquante pour « "+(ev.event||"événement")+" ».");
@@ -5032,6 +5062,17 @@ document.addEventListener("change",function(ev){
   var t=ev.target;
   if(t.matches("[data-deg-pending]"))degTogglePending(+t.dataset.eventId,t.dataset.key,t.checked);
   if(t.matches(".deg-date-native"))degUpdateEvent(+t.dataset.eventId,"date",t.value);
+});
+document.addEventListener("keydown",function(ev){
+  var t=ev.target;
+  if(!(t&&t.dataset&&t.dataset.degField==="guests"))return;
+  if(t.value==="Moi"&&ev.key&&ev.key.length===1&&!ev.ctrlKey&&!ev.metaKey&&!ev.altKey){
+    ev.preventDefault();t.value=ev.key;degUpdateEvent(+t.dataset.eventId,"guests",t.value);
+  }
+});
+document.addEventListener("focusin",function(ev){
+  var t=ev.target;
+  if(t&&t.dataset&&t.dataset.degField==="guests"&&t.value==="Moi"){try{t.select();}catch(e){}}
 });
 document.addEventListener("input",function(ev){
   var t=ev.target;
