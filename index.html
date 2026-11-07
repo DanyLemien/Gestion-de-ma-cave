@@ -1620,14 +1620,14 @@ body.search-fixed .search-control-panel{padding-bottom:4px !important;}
 /* ---------- Constantes ---------- */
 var DELIM=";";
 var DRIVE_CSV_FOLDER_URL="https://drive.google.com/drive/u/0/folders/1KNDG9zzJ6Eu2-w3NUt6-bDt8R62PquPn?usp=drive_link";
-var APP_NAME="Gestion de ma cave";var APP_VER="v12.5 — historique synchronisé et convives par défaut";
+var APP_NAME="Gestion de ma cave";var APP_VER="v12.6 — sélection persistante sur iPad";
 var COLS=["Propriété","Nom","Année","Couleur","Pays","Région","Appellation","Cépages","Volume",
 "Localisation","Date entrée","Prix","En cave","Date dégustation","Convives","Evénement","Mets",
 "Commentaire","Photo_etiquette_devant","Photo_etiquette_derriere","Photo_facture"];
 var CAP={"Vin rouge":"#7B1E2B","Vin blanc":"#C9A227","Vin rosé":"#D98A8A","Fermenté":"#7A8450","Spiritueux":"#8A6D3B"};
 function capColor(c){return CAP[(c||"").trim()]||"#9A9186";}
 var LIST_COLS=["Propriété","Couleur","Pays","Région","Appellation","Cépages","Volume","Convives","Evénement","Mets"];
-var K={snap:"cave_snap_v1",set:"cave_set_v1",lists:"cave_lists_v1",deg:"cave_degustations_v1",hist:"cave_historique_audit_v1",histBase:"cave_historique_base_v1",histFile:"cave_historique_fichier_v1"};
+var K={snap:"cave_snap_v1",set:"cave_set_v1",lists:"cave_lists_v1",deg:"cave_degustations_v1",hist:"cave_historique_audit_v1",histBase:"cave_historique_base_v1",histFile:"cave_historique_fichier_v1",sel:"cave_selection_persistante_v1"};
 
 
 /* ---------- Stockage local (tolérant au bac à sable) ---------- */
@@ -1752,7 +1752,9 @@ function loadData(objs,name){
   state.headers=(objs.headers&&objs.headers.length)?objs.headers:COLS.slice();
   state.fileName=name||"";state.loaded=true;state.session=[];state.dirty=false;
   state.inv={cave:null,ligne:null,casier:null,progress:{}};
-  refreshLists();saveSnapshot();
+  refreshLists();
+  if(typeof Selection!=="undefined"&&Selection.restorePersisted)Selection.restorePersisted();
+  saveSnapshot();
 }
 
 
@@ -1869,7 +1871,7 @@ function logChange(type,txt,details){
   });
   state.dirty=true;
 }
-function commit(){refreshLists();saveSnapshot();}
+function commit(){refreshLists();if(typeof Selection!=="undefined"&&Selection.refreshKeysFromRows)Selection.refreshKeysFromRows();saveSnapshot();}
 function cloneRowForAudit(row){
   var o={};
   (state.headers||COLS).forEach(function(h){if(h&&h!=="_id")o[h]=String(row[h]==null?"":row[h]);});
@@ -2316,6 +2318,25 @@ var SS={init:false,scope:"stock",text:"",f:{Couleur:[],Pays:[],Région:[],Appell
  * Une seule API manipule désormais SS.sel et SS.selRows.
  * La représentation des données reste inchangée pour préserver la compatibilité.
  */
+function selectionFileFamily(name){
+  var stem=String(name||"").replace(/^.*[\\/]/,"").replace(/\.csv$/i,"").trim();
+  /* Retire les suffixes de versions successifs sans dépendre d'un format unique. */
+  var prev="";
+  while(stem!==prev){
+    prev=stem;
+    stem=stem.replace(/[_ -](?:20)?\d{2}[-_]\d{2}[-_]\d{2}[_ -]\d{3}$/,'');
+    stem=stem.replace(/[_ -]\d{6}[_ -]\d{3}$/,'');
+    stem=stem.replace(/[_ -]\d{4}-\d{2}-\d{2}[_ -]\d{3}$/,'');
+  }
+  return stem.replace(/^🍇\s*/,"").trim().toLowerCase();
+}
+function selectionRowSignature(r){
+  var fields=["Propriété","Nom","Année","Couleur","Pays","Région","Appellation","Cépages","Volume","Date entrée","Prix"];
+  return fields.map(function(h){
+    return h+"\u241F"+String(r&&r[h]!=null?r[h]:"").replace(/\r\n/g,"\n").replace(/\r/g,"\n").trim();
+  }).join("\u241E");
+}
+
 var Selection={
   keys:function(){
     return Object.keys(SS.sel||{}).filter(function(key){return !!SS.sel[key];});
@@ -2326,17 +2347,20 @@ var Selection={
     key=String(key);
     SS.sel[key]=true;
     SS.selRows[key]=(rowIds||[]).map(String).filter(function(id,pos,arr){return arr.indexOf(id)===pos;});
+    this.savePersisted();
   },
   remove:function(key){
     key=String(key);
     delete SS.sel[key];
     delete SS.selRows[key];
     if(!this.count())SS.selView=false;
+    this.savePersisted();
   },
   clear:function(){
     SS.sel={};
     SS.selRows={};
     SS.selView=false;
+    this.savePersisted();
   },
   physicalIds:function(stockOnly){
     var ids=[];
@@ -2351,14 +2375,108 @@ var Selection={
     });
     return ids;
   },
-  pruneMissing:function(){
+  savePersisted:function(){
+    if(!state.loaded){return;}
+    var items=[];
+    this.keys().forEach(function(key){
+      var rowIds=(SS.selRows[key]||[]).map(String).filter(function(id){return !!byId(id);});
+      if(!rowIds.length)return;
+      var type=(rowIds.length===1&&String(key)===String(rowIds[0]))?"row":"wine";
+      items.push({
+        type:type,
+        key:String(key),
+        rowIds:rowIds.slice(),
+        signatures:rowIds.map(function(id){return selectionRowSignature(byId(id));})
+      });
+    });
+    lsSet(K.sel,JSON.stringify({
+      v:1,
+      fileName:state.fileName||"",
+      family:selectionFileFamily(state.fileName||""),
+      items:items
+    }));
+  },
+  restorePersisted:function(){
+    SS.sel={};
+    SS.selRows={};
+    SS.selView=false;
+    if(!state.loaded)return;
+    var raw=lsGet(K.sel);if(!raw)return;
+    var saved;
+    try{saved=JSON.parse(raw);}catch(e){return;}
+    if(!saved||!Array.isArray(saved.items))return;
+
+    var sameFile=String(saved.fileName||"")===String(state.fileName||"");
+    var sameFamily=!!saved.family&&saved.family===selectionFileFamily(state.fileName||"");
+    if(!sameFile&&!sameFamily)return;
+
+    var used={};
+    function findBySignature(sig){
+      for(var i=0;i<state.data.length;i++){
+        var r=state.data[i],id=String(r._id);
+        if(used[id])continue;
+        if(selectionRowSignature(r)===sig){used[id]=true;return id;}
+      }
+      return null;
+    }
+
+    saved.items.forEach(function(item){
+      var ids=[];
+      if(sameFile){
+        (item.rowIds||[]).forEach(function(id){
+          id=String(id);
+          if(byId(id)&&!used[id]){used[id]=true;ids.push(id);}
+        });
+      }
+      if(ids.length!==(item.rowIds||[]).length){
+        ids=[];
+        (item.signatures||[]).forEach(function(sig){var id=findBySignature(sig);if(id)ids.push(id);});
+      }
+      if(!ids.length)return;
+
+      if(item.type==="row"){
+        ids.forEach(function(id){SS.sel[id]=true;SS.selRows[id]=[id];});
+      }else{
+        var rows=ids.map(function(id){return byId(id);}).filter(Boolean);
+        groupWines(rows).forEach(function(g){
+          SS.sel[g.key]=true;
+          SS.selRows[g.key]=g.ids.map(String);
+        });
+      }
+    });
+    this.pruneMissing(true);
+  },
+  pruneMissing:function(skipSave){
     var existing={};
     state.data.forEach(function(r){existing[String(r._id)]=true;});
+    var changed=false;
     this.keys().slice().forEach(function(key){
       var exact=(SS.selRows[key]||[]).map(String).filter(function(id){return !!existing[id];});
-      if(!exact.length)Selection.remove(key);
-      else SS.selRows[key]=exact;
+      if(!exact.length){delete SS.sel[key];delete SS.selRows[key];changed=true;}
+      else if(exact.length!==(SS.selRows[key]||[]).length){SS.selRows[key]=exact;changed=true;}
     });
+    if(!this.count())SS.selView=false;
+    if(changed&&!skipSave)this.savePersisted();
+  },
+  refreshKeysFromRows:function(){
+    var items=[];
+    this.keys().forEach(function(key){
+      var ids=(SS.selRows[key]||[]).map(String).filter(function(id){return !!byId(id);});
+      if(!ids.length)return;
+      var type=(ids.length===1&&String(key)===String(ids[0]))?"row":"wine";
+      items.push({type:type,ids:ids});
+    });
+    SS.sel={};SS.selRows={};
+    items.forEach(function(item){
+      if(item.type==="row"){
+        item.ids.forEach(function(id){SS.sel[id]=true;SS.selRows[id]=[id];});
+      }else{
+        groupWines(item.ids.map(function(id){return byId(id);}).filter(Boolean)).forEach(function(g){
+          SS.sel[g.key]=true;SS.selRows[g.key]=g.ids.map(String);
+        });
+      }
+    });
+    this.savePersisted();
   }
 };
 SCR.recherche=function(){
@@ -2887,7 +3005,9 @@ function selectAllVisibleSearchRows(){
   runSearch(true);
 }
 function deselectAllVisibleSearchRows(){
-  visibleSearchSelectionKeys().forEach(function(key){Selection.remove(key);});
+  /* « Tout désélectionner » annule toute la sélection persistante,
+     y compris les éléments momentanément masqués par les filtres. */
+  Selection.clear();
   runSearch(true);
 }
 function toggleAllVisibleSearchRows(){
@@ -5219,6 +5339,7 @@ document.getElementById("historyFileInput").addEventListener("change",function(e
   var snap=readSnapshot();
   if(snap&&snap.data&&snap.data.length){
     applySnapshot(snap);
+    Selection.restorePersisted();
     // Proposer la reprise (R028)
     openSheet('<h2>Reprendre la session ?</h2><p class="small muted" style="margin-bottom:14px">Fichier : <b>'+esc(snap.fileName||"(sans nom)")+'</b> · '+snap.data.length+' bouteille(s)'+(snap.dirty?' · '+ (snap.session?snap.session.length:0)+' modif. en attente':"")+'.</p>'
       +'<div class="btnrow"><button class="btn flat" data-a="restart-new">Recommencer</button><button class="btn" data-a="resume">Reprendre</button></div>');
